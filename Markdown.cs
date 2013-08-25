@@ -3,6 +3,8 @@
  * as internally visible.
  * 
  * Since the original is MIT-licensed (license is below), whatever updates I'm making are as well.
+ *
+ * Commit: 61cfec122875
  */
 
 /*
