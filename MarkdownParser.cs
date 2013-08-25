@@ -484,14 +484,17 @@ namespace MarkdownMode
         {
             List<Token> tokens = new List<Token>();
 
-#warning TODO: update to handle strict expressions
-            text = Markdown.BoldRegex.Replace(text, match =>
+            bool strict = MarkdownPackage.Instance != null && MarkdownPackage.Instance.RenderingOptions.StrictBoldItalic;
+            Regex boldRegex = strict ? Markdown.StrictBoldRegex : Markdown.BoldRegex;
+            Regex italicRegex = strict ? Markdown.StrictItalicRegex : Markdown.ItalicRegex;
+
+            text = boldRegex.Replace(text, match =>
                 {
                     tokens.Add(new Token(TokenType.Bold, SpanFromGroup(match.Groups[2], offset)));
                     return new string(_dummyChar, 2) + match.Groups[2].Value + new string(_dummyChar, 2);
                 });
 
-            text = Markdown.ItalicRegex.Replace(text, match =>
+            text = italicRegex.Replace(text, match =>
                 {
                     tokens.Add(new Token(TokenType.Italics, SpanFromGroup(match.Groups[2], offset)));                  
                     return new string(_dummyChar, 3) + match.Groups[2].Value + new string(_dummyChar, 3);

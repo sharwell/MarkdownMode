@@ -23,13 +23,15 @@ namespace MarkdownMode
 
         List<MarkdownSection> sections;
 
-        MarkdownSharp.Markdown markdownTransform = new MarkdownSharp.Markdown();
+        MarkdownSharp.Markdown markdownTransform;
 
         ComboBox sectionCombo;
         bool ignoreComboChange = false;
 
         public Margin(IWpfTextView wpfTextView, MarkdownPackage package, ITextDocumentFactoryService textDocumentFactoryService)
         {
+            this.markdownTransform = new MarkdownSharp.Markdown(package.RenderingOptions.MarkdownOptions);
+
             this.textView = wpfTextView;
             this.package = package;
 

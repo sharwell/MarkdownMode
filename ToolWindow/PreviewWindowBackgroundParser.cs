@@ -11,12 +11,13 @@ namespace MarkdownMode
 {
     internal class PreviewWindowBackgroundParser : BackgroundParser
     {
-        readonly MarkdownSharp.Markdown markdownTransform = new MarkdownSharp.Markdown();
+        readonly MarkdownSharp.Markdown markdownTransform;
 
         public PreviewWindowBackgroundParser(ITextBuffer textBuffer, TaskScheduler taskScheduler, ITextDocumentFactoryService textDocumentFactoryService)
             : base(textBuffer, taskScheduler, textDocumentFactoryService)
         {
             ReparseDelay = TimeSpan.FromMilliseconds(1000);
+            markdownTransform = new MarkdownSharp.Markdown(MarkdownPackage.Instance.RenderingOptions.MarkdownOptions);
         }
 
         public override string Name
