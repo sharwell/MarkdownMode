@@ -4,7 +4,7 @@
  * 
  * Since the original is MIT-licensed (license is below), whatever updates I'm making are as well.
  *
- * Commit: 3ac09212e249
+ * Commit: c09be7e372c1
  */
 
 /*
@@ -112,7 +112,7 @@ namespace MarkdownSharp
     /// </summary>
     public class Markdown
     {
-        private const string _version = "1.10";
+        private const string _version = "1.12";
 
         #region Constructors and Options
 
@@ -250,35 +250,38 @@ namespace MarkdownSharp
         #region Regexes and static setup
 
         internal static readonly Dictionary<string, string> EscapeTable;
+        internal static readonly Dictionary<string, string> InvertedEscapeTable;
         internal static readonly Dictionary<string, string> BackslashEscapeTable;
 
         /// <summary>
-        /// Static constructor
-        /// </summary>
-        /// <remarks>
         /// In the static constuctor we'll initialize what stays the same across all transforms.
-        /// </remarks>
+        /// </summary>
         static Markdown()
         {
             // Table of hash values for escaped characters:
             EscapeTable = new Dictionary<string, string>();
+            InvertedEscapeTable = new Dictionary<string, string>();
             // Table of hash value for backslash escaped characters:
             BackslashEscapeTable = new Dictionary<string, string>();
+
+            string backslashPattern = "";
 
             foreach (char c in @"\`*_{}[]()>#+-.!")
             {
                 string key = c.ToString();
-                string hash = key.GetHashCode().ToString();
+                string hash = GetHashKey(key);
                 EscapeTable.Add(key, hash);
+                InvertedEscapeTable.Add(hash, key);
                 BackslashEscapeTable.Add(@"\" + key, hash);
+                backslashPattern += Regex.Escape(@"\" + key) + "|";
             }
 
+            _backslashEscapes = new Regex(backslashPattern.Substring(0, backslashPattern.Length - 1), RegexOptions.Compiled);
         }
         
-        internal static Regex _blankLines = new Regex(@"^[ ]+$", RegexOptions.Multiline | RegexOptions.Compiled);
         internal static Regex _newlinesLeadingTrailing = new Regex(@"^\n+|\n+\z", RegexOptions.Compiled);
         internal static Regex _newlinesMultiple = new Regex(@"\n{2,}", RegexOptions.Compiled);
-        internal static Regex _leadingWhitespace = new Regex(@"^([ ]*)", RegexOptions.ExplicitCapture | RegexOptions.Compiled);
+        internal static Regex _leadingWhitespace = new Regex(@"^[ ]*", RegexOptions.Compiled);
         internal static Regex _entireLines = new Regex(@"^.*$", RegexOptions.Multiline | RegexOptions.Compiled);
 
         // Lists
@@ -325,9 +328,9 @@ namespace MarkdownSharp
                   [ ]*
                 (?:
                     (?<=\s)             # lookbehind for whitespace
-                    [\x22(]
+                    [""(]
                     (.+?)               # title = $3
-                    [\x22)]
+                    ["")]
                     [ ]*
                 )?                      # title is optional
                 (?:\n+|\Z)", _tabWidth - 1), RegexOptions.Multiline | RegexOptions.IgnorePatternWhitespace | RegexOptions.Compiled);
@@ -358,7 +361,7 @@ namespace MarkdownSharp
                         ({1})               # href = $3
                         [ ]*
                         (                   # $4
-                        (['\x22])           # quote char = $5
+                        (['""])           # quote char = $5
                         (.*?)               # title = $6
                         \5                  # matching quote
                         [ ]*                # ignore any spaces between closing quote and )
@@ -403,7 +406,7 @@ namespace MarkdownSharp
                     ({0})           # href = $3
                     [ ]*
                     (               # $4
-                    (['\x22])       # quote char = $5
+                    (['""])       # quote char = $5
                     (.*?)           # title = $6
                     \5              # matching quote
                     [ ]*
@@ -698,30 +701,16 @@ namespace MarkdownSharp
         /// </remarks>
         public string Transform(string text)
         {
-            if (text == null) return "";
+            if (String.IsNullOrEmpty(text)) return "";
 
             Setup();
 
-            // Standardize line endings
-            text = text.Replace("\r\n", "\n");    // DOS to Unix
-            text = text.Replace("\r", "\n");      // Mac to Unix
-
-            // Make sure $text ends with a couple of newlines:
-            text += "\n\n";
-
-            // convert all tabs to spaces
-            text = Detab(text);
-
-            // Strip any lines consisting only of spaces
-            // This makes subsequent regexen easier to write, because we can
-            // match consecutive blank lines with /\n+/ instead of something
-            // contorted like /[ ]*\n+/ .
-            text = _blankLines.Replace(text, "");
+            text = Normalize(text);
 
             text = HashHTMLBlocks(text);
             text = StripLinkDefinitions(text);
             text = RunBlockGamut(text);
-            text = UnescapeSpecialChars(text);
+            text = Unescape(text);
 
             Cleanup();
 
@@ -759,7 +748,7 @@ namespace MarkdownSharp
         {
             text = DoCodeSpans(text);
             text = EscapeSpecialCharsWithinTagAttributes(text);
-            text = EncodeBackslashEscapes(text);
+            text = EscapeBackslashes(text);
 
             // Images must come first, because ![foo][f] looks like an anchor.
             text = DoImages(text);
@@ -874,10 +863,15 @@ namespace MarkdownSharp
         private string HtmlEvaluator(Match match)
         {
             string text = match.Groups[1].Value;
-            string key = text.GetHashCode().ToString();
+            string key = GetHashKey(text);
             _htmlBlocks[key] = text;
 
             return string.Concat("\n\n", key, "\n\n");
+        }
+
+        private static string GetHashKey(string s)
+        {
+            return "\x1A" + Math.Abs(s.GetHashCode()).ToString() + "\x1A";
         }
 
         /// <summary>
@@ -910,38 +904,6 @@ namespace MarkdownSharp
                 tokens.Add(new HTMLToken(HTMLTokenType.Text, text.Substring(pos, text.Length - pos)));
 
             return tokens;
-        }
-
-
-        /// <summary>
-        /// Within tags -- meaning between &lt; and &gt; -- encode [\ ` * _] so they 
-        /// don't conflict with their use in Markdown for block, italics and strong. 
-        /// We're replacing each such character with its corresponding hash 
-        /// value; this is likely overkill, but it should prevent us from colliding 
-        /// with the escape values by accident.
-        /// </summary>
-        private string EscapeSpecialCharsWithinTagAttributes(string text)
-        {
-            var tokens = TokenizeHTML(text);
-
-            // now, rebuild text from the tokens
-            var sb = new StringBuilder(text.Length);
-
-            foreach (var token in tokens)
-            {
-                string value = token.Value;
-
-                if (token.Type == HTMLTokenType.Tag)
-                {
-                    value = value.Replace(@"\", EscapeTable[@"\"]);
-                    value = Regex.Replace(value, "(?<=.)</?block>(?=.)", EscapeTable[@"`"]);
-                    value = EscapeBoldItalic(value);
-                }
-
-                sb.Append(value);
-            }
-
-            return sb.ToString();
         }
 
 
@@ -1034,42 +996,6 @@ namespace MarkdownSharp
             return result;
         }
 
-        /// <summary>
-        /// escapes Bold [ * ] and Italic [ _ ] characters
-        /// </summary>
-        private string EscapeBoldItalic(string s)
-        {
-            s = s.Replace("*", EscapeTable["*"]);
-            s = s.Replace("_", EscapeTable["_"]);
-            return s;
-        }
-
-
-        /// <summary>
-        /// encodes problem characters in URLs, such as 
-        /// * _  and optionally ' () []  :
-        /// this is to avoid problems with markup later
-        /// </summary>
-        private string EncodeProblemUrlChars(string url)
-        {
-            if (_encodeProblemUrlCharacters)
-            {
-                url = url.Replace("*", "%2A");
-                url = url.Replace("_", "%5F");
-                url = url.Replace("'", "%27");
-                url = url.Replace("(", "%28");
-                url = url.Replace(")", "%29");
-                url = url.Replace("[", "%5B");
-                url = url.Replace("]", "%5D");
-                if (url.Length > 7 && url.Substring(7).Contains(":"))
-                {
-                    // replace any colons in the body of the URL that are NOT followed by 2 or more numbers
-                    url = url.Substring(0, 7) + Regex.Replace(url.Substring(7), @":(?!\d{2,})", "%3A");
-                }
-            }
-
-            return url;
-        }
 
         private string AnchorInlineEvaluator(Match match)
         {
@@ -1480,35 +1406,26 @@ namespace MarkdownSharp
         }
 
         /// <summary>
-        /// removes leading and trailing newlines, splits on two or more newlines, to form "paragraphs".  
-        /// each paragraph is then unhashed (if it is a hash) or wrapped in HTML p tags
+        /// splits on two or more newlines, to form "paragraphs";    
+        /// each paragraph is then unhashed (if it is a hash) or wrapped in HTML p tag
         /// </summary>
         private string FormParagraphs(string text)
         {
-            text = _newlinesLeadingTrailing.Replace(text, "");
-
-            string[] grafs = _newlinesMultiple.Split(text);
-
-            // Wrap <p> tags.
+            // split on two or more newlines
+            string[] grafs = _newlinesMultiple.Split(_newlinesLeadingTrailing.Replace(text, ""));
+            
             for (int i = 0; i < grafs.Length; i++)
             {
-                if (!_htmlBlocks.ContainsKey(grafs[i]))
+                if (grafs[i].StartsWith("\x1A"))
                 {
-                    string block = grafs[i];
-
-                    block = RunSpanGamut(block);
-                    block = _leadingWhitespace.Replace(block, "<p>");
-                    block += "</p>";
-
-                    grafs[i] = block;
-                }
-            }
-
-            // Unhashify HTML blocks
-            for (int i = 0; i < grafs.Length; i++)
-            {
-                if (_htmlBlocks.ContainsKey(grafs[i]))
+                    // unhashify HTML blocks
                     grafs[i] = _htmlBlocks[grafs[i]];
+                }
+                else
+                {
+                    // do span level processing inside the block, then wrap result in <p> tags
+                    grafs[i] = _leadingWhitespace.Replace(RunSpanGamut(grafs[i]), "<p>") + "</p>";
+                }
             }
 
             return string.Join("\n\n", grafs);
@@ -1560,7 +1477,7 @@ namespace MarkdownSharp
 
         private string EmailEvaluator(Match match)
         {
-            string email = UnescapeSpecialChars(match.Groups[1].Value);
+            string email = Unescape(match.Groups[1].Value);
 
             //
             //    Input: an email address, e.g. "foo@example.com"
@@ -1587,6 +1504,21 @@ namespace MarkdownSharp
             email = Regex.Replace(email, "\">.+?:", "\">");
             return email;
         }
+
+
+        private static Regex _outDent = new Regex(@"^[ ]{1," + _tabWidth + @"}", RegexOptions.Multiline | RegexOptions.Compiled);
+
+        /// <summary>
+        /// Remove one level of line-leading spaces
+        /// </summary>
+        private string Outdent(string block)
+        {
+            return _outDent.Replace(block, "");
+        }
+
+
+        #region Encoding and Normalization
+
 
         /// <summary>
         /// encodes email address randomly  
@@ -1618,72 +1550,163 @@ namespace MarkdownSharp
         /// <summary>
         /// Encode any ampersands (that aren't part of an HTML entity) and left or right angle brackets
         /// </summary>
-        private string EncodeAmpsAndAngles(string text)
+        private string EncodeAmpsAndAngles(string s)
         {
-            text = _amps.Replace(text, "&amp;");
-            text = _angles.Replace(text, "&lt;");
-            return text;
+            s = _amps.Replace(s, "&amp;");
+            s = _angles.Replace(s, "&lt;");
+            return s;
         }
+
+        private static Regex _backslashEscapes;
 
         /// <summary>
         /// Encodes any escaped characters such as \`, \*, \[ etc
         /// </summary>
-        private string EncodeBackslashEscapes(string text)
+        private string EscapeBackslashes(string s)
         {
-            foreach (var pair in BackslashEscapeTable)
-                text = text.Replace(pair.Key, pair.Value);
-            return text;
+            return _backslashEscapes.Replace(s, new MatchEvaluator(EscapeBackslashesEvaluator));
         }
+        private string EscapeBackslashesEvaluator(Match match)
+        {
+            return BackslashEscapeTable[match.Value];
+        }
+       
+        private static Regex _unescapes = new Regex("\x1A\\d+\x1A", RegexOptions.Compiled);
 
         /// <summary>
         /// swap back in all the special characters we've hidden
         /// </summary>
-        private string UnescapeSpecialChars(string text)
+        private string Unescape(string s)
         {
-            foreach (var pair in EscapeTable)
-                text = text.Replace(pair.Value, pair.Key);
-            return text;
+            return _unescapes.Replace(s, new MatchEvaluator(UnescapeEvaluator));
+        }
+        private string UnescapeEvaluator(Match match)
+        {
+            return InvertedEscapeTable[match.Value];
         }
 
-        private static Regex _outDent = new Regex(@"^([ ]{1," + _tabWidth + @"})", RegexOptions.Multiline | RegexOptions.Compiled);
 
         /// <summary>
-        /// Remove one level of line-leading spaces
+        /// escapes Bold [ * ] and Italic [ _ ] characters
         /// </summary>
-        private string Outdent(string block)
+        private string EscapeBoldItalic(string s)
         {
-            return _outDent.Replace(block, "");
+            s = s.Replace("*", EscapeTable["*"]);
+            s = s.Replace("_", EscapeTable["_"]);
+            return s;
         }
 
         /// <summary>
-        /// Convert all tabs to _tabWidth spaces
+        /// encodes problem characters in URLs, such as 
+        /// * _  and optionally ' () []  :
+        /// this is to avoid problems with markup later
         /// </summary>
-        private string Detab(string text)
+        private string EncodeProblemUrlChars(string url)
         {
-            var sb = new StringBuilder(text.Length);
-            int last = -1;
-            for (int i = 0, linepos = 0; i < text.Length; ++i, ++linepos)
+            if (_encodeProblemUrlCharacters)
             {
-                if (text[i] == '\n') linepos = -1;
-                else if (text[i] == '\t')
+                url = url.Replace("\"", "%22");
+                url = url.Replace("*", "%2A");
+                url = url.Replace("_", "%5F");
+                url = url.Replace("'", "%27");
+                url = url.Replace("(", "%28");
+                url = url.Replace(")", "%29");
+                url = url.Replace("[", "%5B");
+                url = url.Replace("]", "%5D");
+                url = url.Replace("$", "%24");
+                if (url.Length > 7 && url.Substring(7).Contains(":"))
                 {
-                    int count = i - 1 - last;
-                    if (count > 0) sb.Append(text, last + 1, count);
-                    last = i;
-
-                    for (int k = 0; k < (_tabWidth - linepos % _tabWidth); ++k)
-                        sb.Append(' ');
-
-                    linepos += (_tabWidth - linepos % _tabWidth) - 1;
+                    // replace any colons in the body of the URL that are NOT followed by 2 or more numbers
+                    url = url.Substring(0, 7) + Regex.Replace(url.Substring(7), @":(?!\d{2,})", "%3A");
                 }
             }
 
-            if (last == -1) return text;
-            var remaining = text.Length - 1 - last;
-            if (remaining > 0) sb.Append(text, last + 1, remaining);
+            return url;
+        }
+
+
+        /// <summary>
+        /// Within tags -- meaning between &lt; and &gt; -- encode [\ ` * _] so they 
+        /// don't conflict with their use in Markdown for code, italics and strong. 
+        /// We're replacing each such character with its corresponding hash 
+        /// value; this is likely overkill, but it should prevent us from colliding 
+        /// with the escape values by accident.
+        /// </summary>
+        private string EscapeSpecialCharsWithinTagAttributes(string text)
+        {
+            var tokens = TokenizeHTML(text);
+
+            // now, rebuild text from the tokens
+            var sb = new StringBuilder(text.Length);
+
+            foreach (var token in tokens)
+            {
+                string value = token.Value;
+
+                if (token.Type == HTMLTokenType.Tag)
+                {
+                    value = value.Replace(@"\", EscapeTable[@"\"]);
+                    value = Regex.Replace(value, "(?<=.)</?code>(?=.)", EscapeTable[@"`"]);
+                    value = EscapeBoldItalic(value);
+                }
+
+                sb.Append(value);
+            }
 
             return sb.ToString();
         }
+
+        /// <summary>
+        /// convert all tabs to _tabWidth spaces; 
+        /// standardizes line endings from DOS (CR LF) or Mac (CR) to UNIX (LF); 
+        /// makes sure text ends with a couple of newlines; 
+        /// removes any blank lines (only spaces) in the text
+        /// </summary>
+        private string Normalize(string text)
+        {
+            var output = new StringBuilder(text.Length);
+            var line = new StringBuilder();
+            bool valid = false;
+
+            for (int i = 0; i < text.Length; i++)
+            {
+                switch (text[i])
+                {
+                    case '\n':
+                        if (valid) output.Append(line);
+                        output.Append('\n');
+                        line.Length = 0; valid = false;
+                        break;
+                    case '\r':
+                        if ((i < text.Length - 1) && (text[i + 1] != '\n'))
+                        {
+                            if (valid) output.Append(line);
+                            output.Append('\n');
+                            line.Length = 0; valid = false;
+                        }
+                        break;
+                    case '\t':
+                        int width = (_tabWidth - line.Length % _tabWidth);
+                        for (int k = 0; k < width; k++)
+                            line.Append(' ');
+                        break;
+                    case '\x1A':
+                        break;
+                    default:
+                        if (!valid && text[i] != ' ') valid = true;
+                        line.Append(text[i]);
+                        break;
+                }
+            }
+
+            if (valid) output.Append(line);
+            output.Append('\n');
+
+            // add two newlines to the end before return
+            return output.Append("\n\n").ToString();
+        }
+
+        #endregion
 
         /// <summary>
         /// this is to emulate what's evailable in PHP
@@ -1691,10 +1714,8 @@ namespace MarkdownSharp
         private static string RepeatString(string text, int count)
         {
             var sb = new StringBuilder(text.Length * count);
-
             for (int i = 0; i < count; i++)
                 sb.Append(text);
-
             return sb.ToString();
         }
 
