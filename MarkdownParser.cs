@@ -484,6 +484,7 @@ namespace MarkdownMode
         {
             List<Token> tokens = new List<Token>();
 
+#warning TODO: update to handle strict expressions
             text = Markdown.BoldRegex.Replace(text, match =>
                 {
                     tokens.Add(new Token(TokenType.Bold, SpanFromGroup(match.Groups[2], offset)));
